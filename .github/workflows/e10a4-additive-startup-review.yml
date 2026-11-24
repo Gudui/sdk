@@ -1,0 +1,107 @@
+name: FW550 E10A.4 additive legacy containment (OFFLINE ONLY)
+on:
+  push:
+    branches:
+      - fix/e10a4-additive-checked-read-v045
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  stock-vs-additive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install fixed LLVM 18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 lld-18 python3 binutils make
+      - name: Verify exact original legacy body and original patch CRT source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/stock" a7685ce8e97ce1f8a4f38253a41d54241c9124f1
+          python3 - "$RUNNER_TEMP/stock/crt/kernel.c" crt/kernel.c <<'PY'
+          import pathlib,sys
+          a,b=(pathlib.Path(p).read_text() for p in sys.argv[1:])
+          def legacy(s):
+              st=s.index("int\\nkernel_copyout(")
+              en=s.index("\\nint\\nkernel_",st+10)
+              return s[st:en]
+          assert legacy(a)==legacy(b),"Legacy kernel_copyout must exactly match v0.45"
+          assert "kernel_copyout_core(" in b, "Checked API core missing"
+          assert b.count("kernel_copyout_exact(")==1
+          print("PASS: exact stock v0.45 legacy body restored and checked API preserved")
+          PY
+          cmp "$RUNNER_TEMP/stock/crt/patch.c" crt/patch.c
+          cmp "$RUNNER_TEMP/stock/crt/crt.c" crt/crt.c
+      - name: Compare same minimal smoke B (stock) with D (additive)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p offline-review
+          echo "compiler=$(/usr/bin/clang-18 --version | head -1)" > offline-review/provenance.txt
+          echo "B=upstream-v0.45:a7685ce8e97ce1f8a4f38253a41d54241c9124f1" >> offline-review/provenance.txt
+          echo "D_source_commit=$(git rev-parse HEAD)" >> offline-review/provenance.txt
+          sha256sum samples/fw550_e10a4_startup_smoke/main.c samples/fw550_e10a4_startup_smoke/Makefile >> offline-review/provenance.txt
+          for variant in B D; do
+            if [[ "$variant" == B ]];then root="$RUNNER_TEMP/stock";else root="$GITHUB_WORKSPACE";fi
+            SDK="$GITHUB_WORKSPACE/.sdk-$variant"
+            make -C "$root" DESTDIR="$SDK" LLVM_CONFIG=llvm-config-18 install > "offline-review/$variant-sdk-build.log" 2>&1
+            export PS5_PAYLOAD_SDK="$SDK" LLVM_CONFIG=/usr/bin/llvm-config-18
+            make -B -C samples/fw550_e10a4_startup_smoke OUTDIR=build-additive-$variant all | tee "offline-review/$variant-smoke-build.log"
+            cp "samples/fw550_e10a4_startup_smoke/build-additive-$variant/fw550_e10a4_startup_v045.elf" "offline-review/$variant-smoke.elf"
+            cp "$SDK/target/lib/crt1.o" "offline-review/$variant-crt1.o"
+            ELF="offline-review/$variant-smoke.elf"
+            readelf -lW "$ELF" > "offline-review/$variant-phdr.txt"
+            readelf -rW "$ELF" > "offline-review/$variant-relocs.txt"
+            readelf -SW "$ELF" > "offline-review/$variant-sections.txt"
+            llvm-nm-18 -anS "$ELF" > "offline-review/$variant-symbols.txt"
+            objdump -d -M intel "$ELF" > "offline-review/$variant-disasm.txt"
+            sha256sum "$ELF" "offline-review/$variant-crt1.o" >> offline-review/provenance.txt
+          done
+      - name: Strict additive startup-path + relocation audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib,re
+          P=pathlib.Path("offline-review")
+          for v in ("B","D"):
+              rl=(P/f"{v}-relocs.txt").read_text()
+              types=re.findall(r"R_X86_64_[A-Z0-9_]+",rl)
+              assert set(types)<={"R_X86_64_RELATIVE"},(v,set(types))
+              ph=(P/f"{v}-phdr.txt").read_text()
+              loads=[]
+              for line in ph.splitlines():
+                  q=line.split()
+                  if q and q[0]=="LOAD": loads.append((int(q[2],16),int(q[2],16)+int(q[5],16),q[6]))
+              assert len(loads)>=2
+              for a,b,f in loads:
+                  if "E" not in f:continue
+                  for c,d,g in loads:
+                      if "E" in g:continue
+                      assert (b-1)//0x4000<c//0x4000 or (d-1)//0x4000<a//0x4000,(v,loads)
+              print(v,"PASS relocations",len(types),"and no X/RW page overlap")
+          d=(P/"D-disasm.txt").read_text()
+          block=d.split("<kernel_copyout>:",1)[1].split("\\n\\n",1)[0]
+          assert "kernel_copyout_core" not in block, "Legacy must never call shared checked core"
+          assert "<kernel_copyout_exact>:" in d
+          assert "<kernel_copyout_core>:" in d
+          assert "<__patch_init>:" in d
+          print("PASS D legacy machine code does not call checked core; checked API remains linked")
+          PY
+      - name: Checked-read host regressions
+        run: |
+          make -C tests -f Makefile.checked-read test
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -o /tmp/fw550-contract samples/fw550_e10a4_capture/tests/test_fw550_read_contract.c samples/fw550_e10a4_capture/fw550_read_contract.c
+          /tmp/fw550-contract
+          python3 samples/fw550_e10a4_capture/tests/test_capture_validator.py
+      - name: Publish offline B-vs-D comparison only (never deploy)
+        uses: actions/upload-artifact@v4
+        with:
+          name: E10A4-stock-vs-additive-LLVM18-startup-OFFLINE
+          path: offline-review/
+          if-no-files-found: error
