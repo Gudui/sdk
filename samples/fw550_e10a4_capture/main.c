@@ -78,6 +78,8 @@ static struct fw550_transfer_result diagnostic_read(
 }
 
 int main(void) {
+  /* First application-level operation. CRT startup has already completed. */
+  klog_puts("E10A4D MAIN_ENTER variant=additive_legacy_v045 windows=10 bytes=134");
   unsigned firmware=kernel_get_fw_version();
   uint64_t text=(uint64_t)KERNEL_ADDRESS_TEXT_BASE;
   uint64_t data=(uint64_t)KERNEL_ADDRESS_DATA_BASE;
