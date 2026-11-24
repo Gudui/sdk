@@ -11,6 +11,6 @@ CFLAGS += -g -O1 -Wall -Wextra -Werror
 all: $(ELF)
 $(ELF): main.c
 	mkdir -p $(OUTDIR)
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ main.c fw550_read_contract.c
 clean:
 	rm -rf $(OUTDIR)
