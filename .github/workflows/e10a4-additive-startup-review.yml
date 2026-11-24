@@ -27,8 +27,8 @@ jobs:
           import pathlib,sys
           a,b=(pathlib.Path(p).read_text() for p in sys.argv[1:])
           def legacy(s):
-              st=s.index("int\\nkernel_copyout(")
-              en=s.index("\\nint\\nkernel_",st+10)
+              st=s.index("int\nkernel_copyout(")
+              en=s.index("\nint\nkernel_",st+10)
               return s[st:en]
           assert legacy(a)==legacy(b),"Legacy kernel_copyout must exactly match v0.45"
           assert "kernel_copyout_core(" in b, "Checked API core missing"
@@ -86,7 +86,7 @@ jobs:
                       assert (b-1)//0x4000<c//0x4000 or (d-1)//0x4000<a//0x4000,(v,loads)
               print(v,"PASS relocations",len(types),"and no X/RW page overlap")
           d=(P/"D-disasm.txt").read_text()
-          block=d.split("<kernel_copyout>:",1)[1].split("\\n\\n",1)[0]
+          block=d.split("<kernel_copyout>:",1)[1].split("\n\n",1)[0]
           assert "kernel_copyout_core" not in block, "Legacy must never call shared checked core"
           assert "<kernel_copyout_exact>:" in d
           assert "<kernel_copyout_core>:" in d
