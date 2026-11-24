@@ -36,7 +36,7 @@ jobs:
       - name: Build one-shot startup smoke (NEVER DEPLOY)
         shell: bash
         env:
-          LLVM_CONFIG: llvm-config-18
+          LLVM_CONFIG: /usr/bin/llvm-config-18
         run: |
           set -euo pipefail
           make -C samples/fw550_e10a4_startup_smoke all
