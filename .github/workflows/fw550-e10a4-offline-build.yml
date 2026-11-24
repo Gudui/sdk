@@ -1,0 +1,60 @@
+name: FW550 E10A4 offline build (never deploy)
+on:
+  push:
+    branches:
+      - feat/fw550-checked-kernel-read
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host and PS5 build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 lld-18 python3 make wget
+      - name: Check host transfer state machine (no console)
+        run: make -C tests -f Makefile.checked-read test
+      - name: Check exact manifest and receipt validator (no console)
+        run: python3 samples/fw550_e10a4_capture/tests/test_capture_validator.py
+      - name: Build SDK into isolated ephemeral install prefix
+        run: |
+          make DESTDIR="$GITHUB_WORKSPACE/.sdk-e10a4" LLVM_CONFIG=llvm-config-18 install
+      - name: Build independent one-shot PS5 ELF
+        run: |
+          export PS5_PAYLOAD_SDK="$GITHUB_WORKSPACE/.sdk-e10a4"
+          make -C samples/fw550_e10a4_capture all
+      - name: Audit final ELF and linked exact-copy symbol
+        run: |
+          set -eu
+          ELF="samples/fw550_e10a4_capture/build-e10a4/fw550_e10a4_capture.elf"
+          test -f "$ELF"
+          test -s "$ELF"
+          llvm-readelf-18 -h "$ELF"
+          llvm-nm-18 "$ELF" | grep 'kernel_copyout_exact'
+          strings "$ELF" | grep 'E10A4 READ_DONE'
+          {
+            echo "repo_commit=$(git rev-parse HEAD)"
+            echo "repo_branch=$(git branch --show-current)"
+            echo "llvm=$(/usr/bin/clang-18 --version | head -1)"
+            sha256sum "$ELF"
+            sha256sum ".sdk-e10a4/target/lib/crt1.o"
+            llvm-nm-18 "$ELF" | grep -E 'kernel_copyout_exact|__crt_syscall'
+          } > samples/fw550_e10a4_capture/build-e10a4/build-audit.txt
+          cat samples/fw550_e10a4_capture/build-e10a4/build-audit.txt
+      - name: Upload build artifact for independent review
+        uses: actions/upload-artifact@v4
+        with:
+          name: fw550-e10a4-diagnostic-review-only
+          path: |
+            samples/fw550_e10a4_capture/build-e10a4/fw550_e10a4_capture.elf
+            samples/fw550_e10a4_capture/build-e10a4/build-audit.txt
+            samples/fw550_e10a4_capture/main.c
+            samples/fw550_e10a4_capture/evidence/stage_b_windows.json
+            samples/fw550_e10a4_capture/tools/verify_five_site_capture.py
+          if-no-files-found: error
