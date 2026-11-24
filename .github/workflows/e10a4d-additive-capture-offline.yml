@@ -1,0 +1,158 @@
+name: E10A.4D additive ten-window FW550 capture — OFFLINE ONLY
+on:
+  push:
+    branches:
+      - fix/e10a4-additive-checked-read-v045
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-audit-no-deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install pinned build/audit toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 lld-18 binutils python3 make
+      - name: Assert original legacy implementation, additive API, and unchanged Stage B evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor a7685ce8e97ce1f8a4f38253a41d54241c9124f1 HEAD
+          git merge-base --is-ancestor 5ab32fd47f78dc89788b04fbc824a2e46d85231d HEAD
+          git show a7685ce8e97ce1f8a4f38253a41d54241c9124f1:crt/kernel.c > /tmp/e10a4d-stock-kernel.c
+          python3 - <<'PY'
+          import pathlib
+          def fn(s, name):
+              st=s.index("int\n"+name+"(")
+              ed=s.index("\nint\n",st+6)
+              return s[st:ed]
+          old=pathlib.Path("/tmp/e10a4d-stock-kernel.c").read_text()
+          new=pathlib.Path("crt/kernel.c").read_text()
+          assert fn(old,"kernel_copyout")==fn(new,"kernel_copyout"),"Legacy body differs from original v0.45"
+          assert "kernel_copyout_exact(unsigned long kaddr" in new
+          main=pathlib.Path("samples/fw550_e10a4_capture/main.c").read_text()
+          body=main.split("int main(void) {",1)[1]
+          marker='klog_puts("E10A4D MAIN_ENTER variant=additive_legacy_v045 windows=10 bytes=134");'
+          assert marker in body
+          assert body.index(marker) < body.index("kernel_get_fw_version()")
+          print("PASS: original legacy kernel_copyout exact source, separate checked API, MAIN_ENTER before firmware query")
+          PY
+          git diff --exit-code 5ab32fd47f78dc89788b04fbc824a2e46d85231d -- \
+            samples/fw550_e10a4_capture/Makefile \
+            samples/fw550_e10a4_capture/fw550_read_contract.c \
+            samples/fw550_e10a4_capture/fw550_read_contract.h \
+            samples/fw550_e10a4_capture/fw550_windows_generated.h \
+            samples/fw550_e10a4_capture/evidence/stage_b_windows.json
+      - name: Run existing checked-read and capture contract regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C tests -f Makefile.checked-read test
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -o /tmp/e10a4d-capture-contract \
+            samples/fw550_e10a4_capture/tests/test_fw550_read_contract.c \
+            samples/fw550_e10a4_capture/fw550_read_contract.c
+          /tmp/e10a4d-capture-contract
+          python3 samples/fw550_e10a4_capture/tests/test_capture_validator.py
+      - name: Build isolated D SDK using LLVM18
+        shell: bash
+        run: |
+          set -euo pipefail
+          make DESTDIR="$GITHUB_WORKSPACE/.sdk-e10a4d" LLVM_CONFIG=llvm-config-18 install > /tmp/sdk-e10a4d-build.log 2>&1
+          echo "PS5_PAYLOAD_SDK=$GITHUB_WORKSPACE/.sdk-e10a4d" >> "$GITHUB_ENV"
+      - name: Link uniquely named D capture ELF — no deploy
+        shell: bash
+        env:
+          LLVM_CONFIG: /usr/bin/llvm-config-18
+        run: |
+          set -euo pipefail
+          make -C samples/fw550_e10a4_capture \
+            OUTDIR=build-fw550-v045-D \
+            ELF=build-fw550-v045-D/fw550_e10a4_D_additive_v045.elf \
+            all
+          mkdir -p e10a4d-review
+          cp samples/fw550_e10a4_capture/build-fw550-v045-D/fw550_e10a4_D_additive_v045.elf \
+             e10a4d-review/fw550_e10a4_D_additive_v045.elf
+          cp "$PS5_PAYLOAD_SDK/target/lib/crt1.o" e10a4d-review/D-crt1.o
+      - name: Audit final linked ELF relocation destinations, segments, markers, entrypoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          ELF=e10a4d-review/fw550_e10a4_D_additive_v045.elf
+          readelf -hW "$ELF" > e10a4d-review/elf-header.txt
+          readelf -lW "$ELF" > e10a4d-review/program-headers.txt
+          readelf -rW "$ELF" > e10a4d-review/relocations.txt
+          readelf -SW "$ELF" > e10a4d-review/section-headers.txt
+          llvm-nm-18 -anS "$ELF" > e10a4d-review/symbols.txt
+          objdump -d -M intel "$ELF" > e10a4d-review/disassembly.txt
+          python3 - <<'PY' | tee e10a4d-review/audit.txt
+          import pathlib, subprocess, re, hashlib
+          elf=pathlib.Path("e10a4d-review/fw550_e10a4_D_additive_v045.elf")
+          data=elf.read_bytes()
+          header=subprocess.check_output(["readelf","-hW",str(elf)],text=True)
+          assert "DYN (Position-Independent Executable file)" in header
+          assert "Advanced Micro Devices X86-64" in header
+          entry=int(re.search(r"Entry point address:\s*(0x[0-9a-fA-F]+)",header).group(1),16)
+          ph=subprocess.check_output(["readelf","-lW",str(elf)],text=True)
+          loads=[]
+          for line in ph.splitlines():
+              f=line.split()
+              if f and f[0]=="LOAD":
+                  v0=int(f[2],16); memsz=int(f[5],16)
+                  loads.append(dict(start=v0,end=v0+memsz,filesz=int(f[4],16),fileoff=int(f[1],16),flags=f[6]))
+          assert len(loads)>=2
+          assert any(l["start"]<=entry<l["end"] and "E" in l["flags"] for l in loads), "Entry outside executable LOAD"
+          for a in loads:
+              if "E" not in a["flags"]:continue
+              for b in loads:
+                  if "E" in b["flags"]:continue
+                  assert (a["end"]-1)//0x4000 < b["start"]//0x4000 or (b["end"]-1)//0x4000 < a["start"]//0x4000, ("16KiB X/RW overlap",a,b)
+          reloc=subprocess.check_output(["readelf","-rW",str(elf)],text=True)
+          entries=[]
+          for line in reloc.splitlines():
+              f=line.split()
+              if len(f)>=5 and f[2].startswith("R_X86_64_"):
+                  assert f[2]=="R_X86_64_RELATIVE",("Unsupported relocation",f[2])
+                  off=int(f[0],16); addend=int(f[-1],16) if re.fullmatch(r"[0-9a-fA-F]+",f[-1]) else None
+                  assert any(l["start"]<=off and off+8<=l["end"] and "W" in l["flags"] for l in loads),("Unwritable relocation destination",hex(off))
+                  entries.append((off,addend))
+          assert entries,"No relocations parsed"
+          symbols=subprocess.check_output(["llvm-nm-18","-anS",str(elf)],text=True)
+          for name in ["kernel_copyout","kernel_copyout_exact","fw550_capture_run","__patch_init","main"]:
+              assert re.search(r"\b"+re.escape(name)+r"$",symbols,re.M),("Missing linked symbol",name)
+          strings=subprocess.check_output(["strings",str(elf)],text=True)
+          for name in ["E10A4D MAIN_ENTER","E10A4 START","E10A4 READ_BEGIN","E10A4 READ_DONE","E10A4 READ_BYTES","E10A4 PASS","E10A4 ABORT"]:
+              assert name in strings,("Missing receipt",name)
+          dis=subprocess.check_output(["objdump","-d","-M","intel",str(elf)],text=True)
+          assert "<main>:" in dis
+          assert "<kernel_copyout>:" in dis
+          assert "<kernel_copyout_exact>:" in dis
+          legacy=dis.split("<kernel_copyout>:",1)[1].split("\n\n",1)[0]
+          assert "kernel_copyout_core" not in legacy,"Legacy reaches refactored core"
+          print("source_commit="+subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip())
+          print("sdk_parent=a7685ce8e97ce1f8a4f38253a41d54241c9124f1 (upstream v0.45)")
+          print("compiler="+subprocess.check_output(["/usr/bin/clang-18","--version"],text=True).splitlines()[0])
+          print("sha256="+hashlib.sha256(data).hexdigest())
+          print("entrypoint="+hex(entry))
+          print("load_segments="+repr(loads))
+          print("relocations="+str(len(entries))+" R_X86_64_RELATIVE; writable destinations")
+          print("main_enter_marker=E10A4D MAIN_ENTER")
+          print("no X/non-X 16KiB overlap; legacy does not call exact shared core")
+          PY
+          sha256sum "$ELF" e10a4d-review/D-crt1.o > e10a4d-review/sha256sums.txt
+          cp samples/fw550_e10a4_capture/main.c e10a4d-review/main.c
+          cp samples/fw550_e10a4_capture/Makefile e10a4d-review/Makefile
+          cp samples/fw550_e10a4_capture/fw550_read_contract.c e10a4d-review/fw550_read_contract.c
+          cp samples/fw550_e10a4_capture/fw550_read_contract.h e10a4d-review/fw550_read_contract.h
+          cp samples/fw550_e10a4_capture/fw550_windows_generated.h e10a4d-review/fw550_windows_generated.h
+          cp samples/fw550_e10a4_capture/evidence/stage_b_windows.json e10a4d-review/stage_b_windows.json
+      - name: Archive review artifact only — no upload to console
+        uses: actions/upload-artifact@v4
+        with:
+          name: E10A4D-ADDITIVE-TEN-WINDOW-OFFLINE-REVIEW-ONLY
+          path: e10a4d-review/
+          if-no-files-found: error
