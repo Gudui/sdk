@@ -1,0 +1,150 @@
+name: E10A.4P read-disabled preflight — OFFLINE ONLY
+on:
+  push:
+    branches:
+      - investigation/e10a4d-preread-no-text-read
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preflight-binary-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install pinned LLVM 18 and binutils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 lld-18 python3 make binutils
+      - name: Assert D source ancestry and unchanged original Stage B contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor be58d0ffcb17ad3f3a5e039d6dbadccd5cd610f1 HEAD
+          git diff --exit-code be58d0ffcb17ad3f3a5e039d6dbadccd5cd610f1 HEAD -- crt \
+            samples/fw550_e10a4_capture
+          git show a7685ce8e97ce1f8a4f38253a41d54241c9124f1:crt/kernel.c >/tmp/stock-kernel.c
+          python3 - <<'PY'
+          from pathlib import Path
+          def legacy(s):
+              a=s.index("int\nkernel_copyout(");b=s.index("\nint\n",a+8)
+              return s[a:b]
+          assert legacy(Path("/tmp/stock-kernel.c").read_text())==legacy(Path("crt/kernel.c").read_text())
+          s=Path("samples/fw550_e10a4_preflight/main.c").read_text()
+          assert "read_disabled_once(" in s and 'E10A4P FORMAT_PROBE index=%u name=%s stage=%s va=%#lx requested=%lu' in s
+          assert "kernel_copyout_exact" not in "\n".join(
+              line for line in s.splitlines() if not line.strip().startswith("*") and not line.strip().startswith("/*")
+          ), "Unexpected live checked-read code in preflight"
+          assert "FW550_CAPTURE_READ_ERROR" in s
+          print("PASS: SDK and D contract unchanged; read-disabled source only")
+          PY
+      - name: Build additive SDK and unique preflight ELF (NO DEPLOY)
+        shell: bash
+        run: |
+          set -euo pipefail
+          make DESTDIR="$GITHUB_WORKSPACE/.sdk-e10a4p" LLVM_CONFIG=llvm-config-18 install >/tmp/sdk-e10a4p-build.log 2>&1
+          export PS5_PAYLOAD_SDK="$GITHUB_WORKSPACE/.sdk-e10a4p"
+          export LLVM_CONFIG=/usr/bin/llvm-config-18
+          make -C samples/fw550_e10a4_preflight all
+          mkdir -p e10a4p-review
+          cp samples/fw550_e10a4_preflight/build-e10a4p-v045/fw550_e10a4P_read_disabled_additive_v045.elf e10a4p-review/
+          cp samples/fw550_e10a4_preflight/main.c e10a4p-review/
+          cp samples/fw550_e10a4_preflight/Makefile e10a4p-review/
+          cp samples/fw550_e10a4_capture/fw550_read_contract.c e10a4p-review/
+          cp samples/fw550_e10a4_capture/fw550_read_contract.h e10a4p-review/
+          cp samples/fw550_e10a4_capture/fw550_windows_generated.h e10a4p-review/
+      - name: Read-only final ELF audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          E=e10a4p-review/fw550_e10a4P_read_disabled_additive_v045.elf
+          readelf -hW "$E" >e10a4p-review/elf-header.txt
+          readelf -lW "$E" >e10a4p-review/program-headers.txt
+          readelf -rW "$E" >e10a4p-review/relocations.txt
+          readelf -SW "$E" >e10a4p-review/sections.txt
+          llvm-nm-18 -anS "$E" >e10a4p-review/symbols.txt
+          objdump -d -M intel "$E" >e10a4p-review/disassembly.txt
+          python3 - <<'PY' | tee e10a4p-review/audit.txt
+          import pathlib,hashlib,re,struct,subprocess
+          p=pathlib.Path("e10a4p-review/fw550_e10a4P_read_disabled_additive_v045.elf")
+          b=p.read_bytes()
+          assert b[:4]==b"\x7fELF" and b[4]==2 and b[5]==1
+          (_,etype,machine,version,entry,phoff,shoff,flags,ehsize,phentsize,phnum,shentsize,shnum,shstrndx)=struct.unpack_from("<16sHHIQQQIHHHHHH",b,0)
+          assert etype==3 and machine==62
+          loads=[]
+          for i in range(phnum):
+              fields=struct.unpack_from("<IIQQQQQQ",b,phoff+i*phentsize)
+              typ,flg,off,va,paddr,filesz,memsz,align=fields
+              if typ==1:loads.append((va,va+memsz,va+filesz,off,flg))
+          assert any(a<=entry<z and (flg&1) for a,z,_,_,flg in loads)
+          for a,z,_,_,f in loads:
+              if not f&1:continue
+              for c,d,_,_,g in loads:
+                  if g&1:continue
+                  assert (z-1)//0x4000<c//0x4000 or (d-1)//0x4000<a//0x4000,(a,z,c,d)
+          reloc=subprocess.check_output(["readelf","-rW",str(p)],text=True)
+          rels=[]
+          for line in reloc.splitlines():
+              parts=line.split()
+              if len(parts)>=4 and parts[2].startswith("R_X86_64_"):
+                  assert parts[2]=="R_X86_64_RELATIVE",parts
+                  va=int(parts[0],16)
+                  assert any(a<=va and va+8<=z and flg&2 for a,z,_,_,flg in loads),parts
+                  rels.append((va,int(parts[-1],16)))
+          assert rels
+          def ptr(va,n):
+              for a,z,fileend,off,flg in loads:
+                  if a<=va and va+n<=fileend:return b[off+(va-a):off+(va-a)+n]
+              raise AssertionError(hex(va))
+          sym=(pathlib.Path("e10a4p-review/symbols.txt")).read_text()
+          d=(pathlib.Path("e10a4p-review/disassembly.txt")).read_text()
+          manifestmatch=re.search(r"(?m)^([0-9a-f]+) [0-9a-f]+ [A-Za-z] fw550_stage_b_windows$",sym)
+          assert manifestmatch, "Manifest symbol missing"
+          manifest=int(manifestmatch.group(1),16)
+          relmap=dict(rels)
+          lengths=[]; sites=[]
+          for i in range(10):
+              va=manifest+i*48
+              site,stage,ofs,length=struct.unpack_from("<QQQB",ptr(va,25))
+              assert site==0 and stage==0,"Runtime relocations expected"
+              a=relmap[va];z=relmap[va+8]
+              def cstring(v):return ptr(v,64).split(b"\0",1)[0].decode("ascii")
+              sitename=cstring(a);stagename=cstring(z)
+              assert stagename==("site" if i%2==0 else "predecessor")
+              assert sitename==["registration","classification","unregistration","descriptor","projection"][i//2]
+              assert 0<length<=21 and ofs+length<=0xc40000 and ofs%0x1000+length<=0x1000
+              lengths.append(length);sites.append((sitename,stagename))
+          assert sum(lengths)==134 and len(sites)==10
+          for name in ["main","read_disabled_once","fw550_capture_run","kernel_copyout"]:
+              assert "<"+name+">:" in d,name
+          for string in [b"E10A4P MAIN_ENTER",b"E10A4P FORMAT_BEGIN",b"E10A4P FORMAT_PROBE",
+                         b"E10A4P FORMAT_RETURNED",b"E10A4P PREFLIGHT_PASS",b"E10A4P POISON_VALID"]:
+              assert string in b,string
+          # Confirm the only preflight callback is read_disabled_once and it has no live kernel read call.
+          m=d.split("<main>:",1)[1].split("\n\n",1)[0]
+          f=d.split("<read_disabled_once>:",1)[1].split("\n\n",1)[0]
+          assert "kernel_copyout_exact" not in m+f
+          assert "kernel_copyout(" not in m+f
+          assert "fw550_capture_run" in m
+          assert "klog_printf" in f and "klog_puts" in f
+          print("source_commit="+subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip())
+          print("sdk_upstream=v0.45:a7685ce8e97ce1f8a4f38253a41d54241c9124f1")
+          print("compiler="+subprocess.check_output(["/usr/bin/clang-18","--version"],text=True).splitlines()[0])
+          print("ELF_sha256="+hashlib.sha256(b).hexdigest())
+          print("entrypoint="+hex(entry))
+          print("relocations="+str(len(rels))+" RELATIVE; destinations writable")
+          print("loads="+repr(loads))
+          print("16KiB executable/non-executable overlap=none")
+          print("manifest=10 original windows, 134 bytes, site/stage pointers relocated")
+          print("application_checked_firmware_text_reads=ZERO (stub callback; no checked API invocation)")
+          print("first window poison + single intentional %s formatter probe; synthetic failure is expected")
+          PY
+          sha256sum "$E" > e10a4p-review/SHA256SUMS.txt
+      - name: Preserve audit artifact only (NO DEPLOY/LAUNCH)
+        uses: actions/upload-artifact@v4
+        with:
+          name: E10A4P-READ-DISABLED-PREFLIGHT-REVIEW-ONLY
+          path: e10a4p-review/
+          if-no-files-found: error
