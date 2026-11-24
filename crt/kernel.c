@@ -19,6 +19,7 @@ along with this program; see the file COPYING. If not, see
 #include "kernel_iommu.h"
 #include "nid.h"
 #include "syscall.h"
+#include "kernel_copyout_core.h"
 
 
 /**
@@ -661,35 +662,64 @@ kernel_copyin(const void *uaddr, unsigned long kaddr, unsigned long len) {
 }
 
 
-int
-kernel_copyout(unsigned long kaddr, void *uaddr, unsigned long len) {
+/* Reuse the legacy pipe setup and SYS_read path for an exact-length API.
+ * This does not make the pipe operation reentrant or fault-contained. */
+static int
+kernel_copyout_setup_flags(void *ctx) {
   kernel_pipebuf_t buf = {0};
-
-  if(!kaddr || !uaddr || !len) {
-    SET_ERRNO(EINVAL);
-    return -1;
-  }
-
+  (void)ctx;
   buf.flags.cnt = 0x40000000;
   buf.flags.in = 0x40000000;
+  return kernel_write(pipe_addr, &buf, sizeof(buf));
+}
 
-  if(kernel_write(pipe_addr, &buf, sizeof(buf))) {
-    return -1;
-  }
-
+static int
+kernel_copyout_setup_address(unsigned long kaddr, void *ctx) {
+  kernel_pipebuf_t buf = {0};
+  (void)ctx;
   buf.pbuf.size = 0x40000000;
   buf.pbuf.kaddr = kaddr;
   buf.pbuf.reserved = 0;
+  return kernel_write(pipe_addr + 12, &buf, sizeof(buf));
+}
 
-  if(kernel_write(pipe_addr + 12, &buf, sizeof(buf))) {
-    return -1;
-  }
+static long
+kernel_copyout_read_once(void *dst, unsigned long len, void *ctx) {
+  (void)ctx;
+  return __crt_syscall(SYS_read, rw_pipe[0], dst, len);
+}
 
-  if(__crt_syscall(SYS_read, rw_pipe[0], uaddr, len) < 0) {
-    return -1;
-  }
+static int
+kernel_copyout_errno(void *ctx) {
+  (void)ctx;
+  return __error ? *__error() : 0;
+}
 
-  return 0;
+static void
+kernel_copyout_set_errno(int val, void *ctx) {
+  (void)ctx;
+  SET_ERRNO(val);
+}
+
+static const struct kernel_copyout_ops kernel_copyout_transport = {
+  kernel_copyout_setup_flags,
+  kernel_copyout_setup_address,
+  kernel_copyout_read_once,
+  kernel_copyout_errno,
+  kernel_copyout_set_errno
+};
+
+int
+kernel_copyout(unsigned long kaddr, void *uaddr, unsigned long len) {
+  return kernel_copyout_core(kaddr, uaddr, len, 0, 0,
+                             &kernel_copyout_transport, 0);
+}
+
+int
+kernel_copyout_exact(unsigned long kaddr, void *uaddr, unsigned long len,
+                     kernel_copyout_exact_result_t *result) {
+  return kernel_copyout_core(kaddr, uaddr, len, result, 1,
+                             &kernel_copyout_transport, 0);
 }
 
 int
