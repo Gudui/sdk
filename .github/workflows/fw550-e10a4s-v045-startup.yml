@@ -1,0 +1,77 @@
+name: E10A4S startup smoke v0.45 build (NEVER DEPLOY)
+on:
+  push:
+    branches:
+      - feat/fw550-checked-kernel-read
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-v045-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install offline build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 lld-18 unzip python3 make curl binutils
+      - name: Download ORIGINAL verified SDK v0.45 binary release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.sdk-release"
+          curl --fail --location --silent --show-error --retry 2 \
+            -o "$GITHUB_WORKSPACE/.sdk-release/ps5-payload-sdk-v045.zip" \
+            https://github.com/ps5-payload-dev/sdk/releases/download/v0.45/ps5-payload-sdk.zip
+          echo "5fac64093d0e3e69f2584ce7935f24f703f622d9681f1495c85b9f00d1291a2c  $GITHUB_WORKSPACE/.sdk-release/ps5-payload-sdk-v045.zip" | sha256sum --check
+          unzip -q "$GITHUB_WORKSPACE/.sdk-release/ps5-payload-sdk-v045.zip" -d "$GITHUB_WORKSPACE/.sdk-release/extracted"
+          FILE=$(find "$GITHUB_WORKSPACE/.sdk-release/extracted" -type f -path '*/toolchain/prospero.mk' -print -quit)
+          test -n "$FILE"
+          SDK=$(dirname "$(dirname "$FILE")")
+          test -s "$SDK/target/lib/crt1.o"
+          echo "PS5_PAYLOAD_SDK=$SDK" >> "$GITHUB_ENV"
+          echo "SDK release root: $SDK"
+          sha256sum "$SDK/target/lib/crt1.o"
+      - name: Build one-shot startup smoke (NEVER DEPLOY)
+        shell: bash
+        env:
+          LLVM_CONFIG: llvm-config-18
+        run: |
+          set -euo pipefail
+          make -C samples/fw550_e10a4_startup_smoke all
+          ELF=samples/fw550_e10a4_startup_smoke/build-e10a4s-v045/fw550_e10a4_startup_v045.elf
+          python3 samples/fw550_e10a4_startup_smoke/tests/verify_elf.py "$ELF"
+      - name: Audit exact standalone ELF and linker objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          ELF=samples/fw550_e10a4_startup_smoke/build-e10a4s-v045/fw550_e10a4_startup_v045.elf
+          {
+            echo "repo_commit=$(git rev-parse HEAD)"
+            echo "sdk_release=v0.45"
+            echo "sdk_release_sha256=5fac64093d0e3e69f2584ce7935f24f703f622d9681f1495c85b9f00d1291a2c"
+            echo "toolchain=$(/usr/bin/clang-18 --version | head -1)"
+            echo "sdk_crt1:"
+            sha256sum "$PS5_PAYLOAD_SDK/target/lib/crt1.o"
+            echo "executable:"
+            sha256sum "$ELF"
+            echo "header:"
+            readelf -h "$ELF"
+            echo "relocation types:"
+            readelf -r "$ELF" | awk '/R_X86_64/ {print $3}' | sort | uniq -c
+            echo "program headers:"
+            readelf -l "$ELF"
+          } > samples/fw550_e10a4_startup_smoke/build-e10a4s-v045/audit.txt
+          cat samples/fw550_e10a4_startup_smoke/build-e10a4s-v045/audit.txt
+      - name: Upload review-only binary (NEVER DEPLOY)
+        uses: actions/upload-artifact@v4
+        with:
+          name: FW550-E10A4S-startup-smoke-v045-review-only
+          path: |
+            samples/fw550_e10a4_startup_smoke/build-e10a4s-v045/fw550_e10a4_startup_v045.elf
+            samples/fw550_e10a4_startup_smoke/build-e10a4s-v045/audit.txt
+            samples/fw550_e10a4_startup_smoke/main.c
+            samples/fw550_e10a4_startup_smoke/Makefile
+            samples/fw550_e10a4_startup_smoke/tests/verify_elf.py
+          if-no-files-found: error
