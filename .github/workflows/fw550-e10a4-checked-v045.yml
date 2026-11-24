@@ -1,8 +1,8 @@
-name: FW550 E10A.4 checked capture v0.45 — offline only
+name: FW550 E10A.4 checked v0.45 16KiB pagefix — offline only
 on:
   push:
     branches:
-      - feat/fw550-checked-v045-runtime
+      - feat/fw550-checked-v045-pagefix
   workflow_dispatch:
 permissions:
   contents: read
@@ -61,13 +61,39 @@ jobs:
           relocs=subprocess.check_output(["readelf","-r",elf],text=True)
           kinds=set(re.findall(r"R_X86_64_[A-Z0-9_]+",relocs))
           assert kinds <= {"R_X86_64_RELATIVE"}, "Unsupported loader relocations: "+repr(kinds)
+          # PS5 page size is 16 KiB. elfldr v0.28 protects PT_LOAD segments
+          # sequentially; executable and non-executable segments must not
+          # share a page, even if the ELF header's address/align are otherwise valid.
+          phdr=subprocess.check_output(["readelf","-lW",elf],text=True)
+          loads=[]
+          for line in phdr.splitlines():
+              f=line.split()
+              if f and f[0]=="LOAD":
+                  loads.append((int(f[2],16),int(f[2],16)+int(f[5],16),f[6]))
+          assert len(loads)>=2, "Expected multiple LOAD segments"
+          page=0x4000
+          for a0,a1,af in loads:
+              if "E" not in af:
+                  continue
+              for b0,b1,bf in loads:
+                  if "E" in bf:
+                      continue
+                  exec_begin=a0//page
+                  exec_end=(a1-1)//page
+                  rw_begin=b0//page
+                  rw_end=(b1-1)//page
+                  assert exec_end<rw_begin or rw_end<exec_begin, (
+                      "16KiB PAGE PROTECTION OVERLAP: "
+                      f"X=[{a0:#x},{a1:#x}) {af} vs nonX=[{b0:#x},{b1:#x}) {bf}"
+                  )
+          print("PASS: no overlapping 16KiB X versus non-X PT_LOAD pages",loads)
           strings=subprocess.check_output(["strings",elf],text=True)
           for marker in ["E10A4 READ_BEGIN","E10A4 READ_DONE","E10A4 PASS","E10A4 ABORT"]:
               assert marker in strings,"Missing "+marker
           syms=subprocess.check_output(["llvm-nm-18",elf],text=True)
           assert re.search(r" [Tt] kernel_copyout_exact$",syms,re.M)
           assert " fw550_capture_run" in syms
-          print("PASS: FW550 linked SDK exact copyout, capture contract, only RELATIVE relocations")
+          print("PASS: FW550 checked SDK, Stage B contract, RELATIVE relocations, no loader page overlap")
           PY
           {
             echo "repo_sha=$(git rev-parse HEAD)"
@@ -85,7 +111,7 @@ jobs:
       - name: Upload offline-review artifact only
         uses: actions/upload-artifact@v4
         with:
-          name: fw550-e10a4-checked-v045-REVIEW-ONLY
+          name: fw550-e10a4-checked-v045-PAGEFIX-REVIEW-ONLY
           path: |
             samples/fw550_e10a4_capture/build-fw550-v045-checked/fw550_e10a4_checked_v045.elf
             samples/fw550_e10a4_capture/build-fw550-v045-checked/build-audit.txt
