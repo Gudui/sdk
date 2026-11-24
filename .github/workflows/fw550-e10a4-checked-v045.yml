@@ -1,0 +1,96 @@
+name: FW550 E10A.4 checked capture v0.45 — offline only
+on:
+  push:
+    branches:
+      - feat/fw550-checked-v045-runtime
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile-audit-never-deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM and offline regression dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 lld-18 python3 make binutils
+      - name: Prove this branch descends from upstream SDK v0.45
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse a7685ce8e97ce1f8a4f38253a41d54241c9124f1^{commit})" = "a7685ce8e97ce1f8a4f38253a41d54241c9124f1"
+          git merge-base --is-ancestor a7685ce8e97ce1f8a4f38253a41d54241c9124f1 HEAD
+          git diff --name-status a7685ce8e97ce1f8a4f38253a41d54241c9124f1 HEAD
+      - name: Host regressions — exact and legacy copyout
+        run: make -C tests -f Makefile.checked-read test
+      - name: Host regressions — actual integrated FW550 capture contract
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -o /tmp/fw550-v045-contract samples/fw550_e10a4_capture/tests/test_fw550_read_contract.c samples/fw550_e10a4_capture/fw550_read_contract.c
+          /tmp/fw550-v045-contract
+      - name: Strict receipt and cleanup validator regressions
+        run: python3 samples/fw550_e10a4_capture/tests/test_capture_validator.py
+      - name: Build and install patched v0.45 SDK isolated from proven release
+        shell: bash
+        run: |
+          set -euo pipefail
+          make DESTDIR="$GITHUB_WORKSPACE/.sdk-v045-checked" LLVM_CONFIG=llvm-config-18 install
+          echo "PS5_PAYLOAD_SDK=$GITHUB_WORKSPACE/.sdk-v045-checked" >> "$GITHUB_ENV"
+      - name: Compile user-space ten-window diagnostic (never deploy)
+        shell: bash
+        env:
+          LLVM_CONFIG: /usr/bin/llvm-config-18
+        run: |
+          set -euo pipefail
+          make -C samples/fw550_e10a4_capture all
+      - name: Audit source-to-binary contract and supported relocations
+        shell: bash
+        run: |
+          set -euo pipefail
+          ELF=samples/fw550_e10a4_capture/build-fw550-v045-checked/fw550_e10a4_checked_v045.elf
+          test -s "$ELF"
+          python3 - "$ELF" <<'PY'
+          import pathlib,re,subprocess,sys
+          elf=sys.argv[1]
+          hdr=subprocess.check_output(["readelf","-h",elf],text=True)
+          assert "DYN (Position-Independent Executable file)" in hdr
+          assert "Advanced Micro Devices X86-64" in hdr
+          relocs=subprocess.check_output(["readelf","-r",elf],text=True)
+          kinds=set(re.findall(r"R_X86_64_[A-Z0-9_]+",relocs))
+          assert kinds <= {"R_X86_64_RELATIVE"}, "Unsupported loader relocations: "+repr(kinds)
+          strings=subprocess.check_output(["strings",elf],text=True)
+          for marker in ["E10A4 READ_BEGIN","E10A4 READ_DONE","E10A4 PASS","E10A4 ABORT"]:
+              assert marker in strings,"Missing "+marker
+          syms=subprocess.check_output(["llvm-nm-18",elf],text=True)
+          assert re.search(r" [Tt] kernel_copyout_exact$",syms,re.M)
+          assert " fw550_capture_run" in syms
+          print("PASS: FW550 linked SDK exact copyout, capture contract, only RELATIVE relocations")
+          PY
+          {
+            echo "repo_sha=$(git rev-parse HEAD)"
+            echo "sdk_parent=v0.45"
+            echo "sdk_parent_sha=a7685ce8e97ce1f8a4f38253a41d54241c9124f1"
+            echo "compiler=$(/usr/bin/clang-18 --version | head -1)"
+            sha256sum "$ELF"
+            sha256sum "$PS5_PAYLOAD_SDK/target/lib/crt1.o"
+            llvm-nm-18 "$ELF" | grep -E 'kernel_copyout_exact|fw550_capture_run|__crt_syscall'
+            readelf -h "$ELF"
+            readelf -r "$ELF" | grep 'R_X86_64' | awk '{print $3}' | sort | uniq -c
+            readelf -l "$ELF"
+          } > samples/fw550_e10a4_capture/build-fw550-v045-checked/build-audit.txt
+          cat samples/fw550_e10a4_capture/build-fw550-v045-checked/build-audit.txt
+      - name: Upload offline-review artifact only
+        uses: actions/upload-artifact@v4
+        with:
+          name: fw550-e10a4-checked-v045-REVIEW-ONLY
+          path: |
+            samples/fw550_e10a4_capture/build-fw550-v045-checked/fw550_e10a4_checked_v045.elf
+            samples/fw550_e10a4_capture/build-fw550-v045-checked/build-audit.txt
+            samples/fw550_e10a4_capture/main.c
+            samples/fw550_e10a4_capture/fw550_read_contract.c
+            samples/fw550_e10a4_capture/fw550_read_contract.h
+            samples/fw550_e10a4_capture/fw550_windows_generated.h
+            samples/fw550_e10a4_capture/evidence/stage_b_windows.json
+            samples/fw550_e10a4_capture/tools/verify_five_site_capture.py
+          if-no-files-found: error
