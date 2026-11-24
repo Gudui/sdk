@@ -18,6 +18,7 @@ along with this program; see the file COPYING. If not, see
 
 #include <sys/cdefs.h>
 #include <sys/types.h>
+#include "kernel_copyout_exact.h"
 
 __BEGIN_DECLS
 
@@ -60,6 +61,9 @@ uint32_t kernel_get_fw_version(void);
 
 int32_t kernel_copyin(const void *udaddr, intptr_t kaddr, size_t len);
 int32_t kernel_copyout(intptr_t kaddr, void *udaddr, size_t  len);
+/* Strict one-shot kernel pipe read: actual SYS_read count and failure stage. */
+int32_t kernel_copyout_exact(intptr_t kaddr, void *udaddr, size_t len,
+                             kernel_copyout_exact_result_t *result);
 
 int32_t kernel_setlong(intptr_t addr, uint64_t val);
 int32_t kernel_setint(intptr_t addr, uint32_t val);
