@@ -1,0 +1,42 @@
+{
+  "firmware": "5.50",
+  "image_sha256": "b8d9a9b826167794398ff2d19e2912c88daf19582f65b0b71d95c0fb593de0b0",
+  "image_size": 12845056,
+  "sites": [
+    {
+      "site": "registration",
+      "start": "0x7FF627",
+      "original_hex": "4181fef80600000f850b020000418d8424af1f0000",
+      "original_044f_prebranch_start": "0x7ff61e",
+      "original_044f_prebranch_hex": "4181fe4f040000742b"
+    },
+    {
+      "site": "classification",
+      "start": "0x7FABA9",
+      "original_hex": "81f9f80600000f85800100000fb7482a",
+      "original_044f_prebranch_start": "0x7fab9e",
+      "original_044f_prebranch_hex": "81f94f04000074240fb7c9"
+    },
+    {
+      "site": "unregistration",
+      "start": "0x7FF892",
+      "original_hex": "3df80600000f850a010000418d8424af1f0000",
+      "original_044f_prebranch_start": "0x7ff88b",
+      "original_044f_prebranch_hex": "3d4f0400007429"
+    },
+    {
+      "site": "descriptor",
+      "start": "0x7FFA53",
+      "original_hex": "3df8060000755d410fb7462a05af1f0000",
+      "original_044f_prebranch_start": "0x7ffa49",
+      "original_044f_prebranch_hex": "3d4f040000742a"
+    },
+    {
+      "site": "projection",
+      "start": "0x7FB5BF",
+      "original_hex": "81fef80600007539410fb7762a81c6af1f0000",
+      "original_044f_prebranch_start": "0x7fb5b4",
+      "original_044f_prebranch_hex": "81fe4f0400007426"
+    }
+  ]
+}
