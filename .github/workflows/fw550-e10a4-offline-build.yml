@@ -20,6 +20,10 @@ jobs:
           sudo apt-get install -y clang-18 llvm-18 lld-18 python3 make wget
       - name: Check host transfer state machine (no console)
         run: make -C tests -f Makefile.checked-read test
+      - name: Check actual FW550 capture contract (no console)
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -o /tmp/fw550-contract-test samples/fw550_e10a4_capture/tests/test_fw550_read_contract.c samples/fw550_e10a4_capture/fw550_read_contract.c
+          /tmp/fw550-contract-test
       - name: Check exact manifest and receipt validator (no console)
         run: python3 samples/fw550_e10a4_capture/tests/test_capture_validator.py
       - name: Build SDK into isolated ephemeral install prefix
@@ -55,6 +59,9 @@ jobs:
             samples/fw550_e10a4_capture/build-e10a4/fw550_e10a4_capture.elf
             samples/fw550_e10a4_capture/build-e10a4/build-audit.txt
             samples/fw550_e10a4_capture/main.c
+            samples/fw550_e10a4_capture/fw550_read_contract.c
+            samples/fw550_e10a4_capture/fw550_read_contract.h
+            samples/fw550_e10a4_capture/fw550_windows_generated.h
             samples/fw550_e10a4_capture/evidence/stage_b_windows.json
             samples/fw550_e10a4_capture/tools/verify_five_site_capture.py
           if-no-files-found: error
