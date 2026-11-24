@@ -711,8 +711,33 @@ static const struct kernel_copyout_ops kernel_copyout_transport = {
 
 int
 kernel_copyout(unsigned long kaddr, void *uaddr, unsigned long len) {
-  return kernel_copyout_core(kaddr, uaddr, len, 0, 0,
-                             &kernel_copyout_transport, 0);
+  kernel_pipebuf_t buf = {0};
+
+  if(!kaddr || !uaddr || !len) {
+    SET_ERRNO(EINVAL);
+    return -1;
+  }
+
+  buf.flags.cnt = 0x40000000;
+  buf.flags.in = 0x40000000;
+
+  if(kernel_write(pipe_addr, &buf, sizeof(buf))) {
+    return -1;
+  }
+
+  buf.pbuf.size = 0x40000000;
+  buf.pbuf.kaddr = kaddr;
+  buf.pbuf.reserved = 0;
+
+  if(kernel_write(pipe_addr + 12, &buf, sizeof(buf))) {
+    return -1;
+  }
+
+  if(__crt_syscall(SYS_read, rw_pipe[0], uaddr, len) < 0) {
+    return -1;
+  }
+
+  return 0;
 }
 
 int
