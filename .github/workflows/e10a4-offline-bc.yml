@@ -1,0 +1,95 @@
+name: E10A.4 offline B-C startup source-locked LLVM18 (NO DEPLOY)
+on:
+  push:
+    branches:
+      - investigation/e10a4-v045-legacy-startup-bc
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  controlled-bc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install one pinned LLVM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18 lld-18 binutils python3 make
+      - name: Create exact upstream v0.45 worktree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git merge-base a7685ce8e97ce1f8a4f38253a41d54241c9124f1 HEAD)" = a7685ce8e97ce1f8a4f38253a41d54241c9124f1
+          git worktree add --detach "$RUNNER_TEMP/sdk-stock" a7685ce8e97ce1f8a4f38253a41d54241c9124f1
+          test "$(git -C "$RUNNER_TEMP/sdk-stock" rev-parse HEAD)" = a7685ce8e97ce1f8a4f38253a41d54241c9124f1
+          git diff 5ab32fd47f78dc89788b04fbc824a2e46d85231d -- crt/kernel.c crt/patch.c crt/crt.c | tee /tmp/dirty_check
+          test ! -s /tmp/dirty_check
+      - name: Compile B and C from identical smoke source and flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bc_outputs
+          echo "compiler=$(/usr/bin/clang-18 --version | head -1)" | tee bc_outputs/provenance.txt
+          echo "B_source=a7685ce8e97ce1f8a4f38253a41d54241c9124f1" | tee -a bc_outputs/provenance.txt
+          echo "C_source=5ab32fd47f78dc89788b04fbc824a2e46d85231d" | tee -a bc_outputs/provenance.txt
+          sha256sum samples/fw550_e10a4_startup_smoke/{main.c,Makefile} | tee -a bc_outputs/provenance.txt
+          for variant in B C; do
+            if [[ "$variant" == B ]]; then root="$RUNNER_TEMP/sdk-stock"; else root="$GITHUB_WORKSPACE"; fi
+            mkdir -p "$GITHUB_WORKSPACE/.sdk-$variant"
+            make -C "$root" DESTDIR="$GITHUB_WORKSPACE/.sdk-$variant" LLVM_CONFIG=llvm-config-18 install > "bc_outputs/$variant-sdk-build.log" 2>&1
+            export PS5_PAYLOAD_SDK="$GITHUB_WORKSPACE/.sdk-$variant"
+            export LLVM_CONFIG=/usr/bin/llvm-config-18
+            make -B -C samples/fw550_e10a4_startup_smoke OUTDIR="build-bc-$variant" all 2>&1 | tee "bc_outputs/$variant-smoke-build.log"
+            ELF="samples/fw550_e10a4_startup_smoke/build-bc-$variant/fw550_e10a4_startup_v045.elf"
+            cp "$ELF" "bc_outputs/$variant-smoke.elf"
+            cp "$PS5_PAYLOAD_SDK/target/lib/crt1.o" "bc_outputs/$variant-crt1.o"
+            sha256sum "bc_outputs/$variant-smoke.elf" "bc_outputs/$variant-crt1.o" | tee -a bc_outputs/provenance.txt
+          done
+      - name: Machine-code / relocation / load-segment audit (read only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for variant in B C; do
+            ELF="bc_outputs/$variant-smoke.elf"
+            readelf -lW "$ELF" > "bc_outputs/$variant-phdr.txt"
+            readelf -rW "$ELF" > "bc_outputs/$variant-relocs.txt"
+            readelf -SW "$ELF" > "bc_outputs/$variant-sections.txt"
+            llvm-nm-18 -anS "$ELF" > "bc_outputs/$variant-symbols.txt"
+            objdump -d -M intel "$ELF" > "bc_outputs/$variant-disasm.txt"
+            objdump -s -j .data.rel.ro "$ELF" > "bc_outputs/$variant-data-rel-ro.txt"
+            readelf -x .data.rel.ro "$ELF" > "bc_outputs/$variant-data-hex.txt"
+            readelf -rW "bc_outputs/$variant-crt1.o" > "bc_outputs/$variant-crt1-relocs.txt"
+            objdump -drwC -M intel "bc_outputs/$variant-crt1.o" > "bc_outputs/$variant-crt1-disasm.txt"
+          done
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          for v in ("B","C"):
+              d=Path("bc_outputs")
+              s=(d/f"{v}-relocs.txt").read_text()
+              kinds=set(re.findall(r"R_X86_64_[A-Z0-9_]+",s))
+              assert kinds <= {"R_X86_64_RELATIVE"}, (v,kinds)
+              ph=(d/f"{v}-phdr.txt").read_text()
+              loads=[]
+              for line in ph.splitlines():
+                  p=line.split()
+                  if p and p[0]=="LOAD":
+                      loads.append((int(p[2],16),int(p[2],16)+int(p[5],16),p[6]))
+              assert loads
+              for a0,a1,flags in loads:
+                  if "E" not in flags: continue
+                  for b0,b1,bflags in loads:
+                      if "E" in bflags: continue
+                      assert (a1-1)//0x4000 < b0//0x4000 or (b1-1)//0x4000 < a0//0x4000, (v,loads)
+              print(v,"relocs",len(re.findall("R_X86_64_RELATIVE",s)),"loads",loads)
+          PY
+          diff -u bc_outputs/B-smoke-build.log bc_outputs/C-smoke-build.log > bc_outputs/build-command-diff.txt || true
+      - name: Preserve B-vs-C artifacts only (no deploy)
+        uses: actions/upload-artifact@v4
+        with:
+          name: e10a4-offline-B-vs-C-LLVM18-NO-DEPLOY
+          path: bc_outputs/
+          if-no-files-found: error
