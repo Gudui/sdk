@@ -48,7 +48,7 @@ int main(void) {
   uint64_t kdata=(uint64_t)KERNEL_ADDRESS_DATA_BASE;
   unsigned i, j, total=0;
 
-  klog_printf("E10A4 START fw=%#x ktext=%#lx kdata=%#lx contract=checked_pipe_v1\\n",
+  klog_printf("E10A4 START fw=%#x ktext=%#lx kdata=%#lx contract=checked_pipe_v1\n",
               firmware,(unsigned long)ktext,(unsigned long)kdata);
   if((firmware&FW550_RAW_MASK)!=FW550_RAW_VERSION ||
      ktext<UINT64_C(0xffff800000000000) ||
@@ -61,7 +61,7 @@ int main(void) {
     const struct window *w=&windows[i];
     if(!w->n || w->n>MAX_BYTES || w->offset>=TEXT_SIZE ||
        w->offset+w->n>TEXT_SIZE || (w->offset&0xfff)+w->n>0x1000) {
-      klog_printf("E10A4 ABORT reason=MANIFEST index=%u\\n",i);
+      klog_printf("E10A4 ABORT reason=MANIFEST index=%u\n",i);
       return 3;
     }
     total+=w->n;
@@ -78,25 +78,25 @@ int main(void) {
     uint64_t address=ktext+w->offset;
     int rc;
     for(j=0;j<w->n;++j)got[j]=poison[j]=(unsigned char)(w->expected[j]^0xff);
-    klog_printf("E10A4 READ_BEGIN index=%u name=%s stage=%s va=%#lx requested=%u\\n",
+    klog_printf("E10A4 READ_BEGIN index=%u name=%s stage=%s va=%#lx requested=%u\n",
                 i,w->name,w->stage,(unsigned long)address,(unsigned)w->n);
     rc=kernel_copyout_exact((intptr_t)address,got,w->n,&receipt);
-    klog_printf("E10A4 READ_DONE index=%u rc=%d stage=%d syscall_attempted=%d signed_returned=%ld transferred=%lu errno=%d requested=%u\\n",
+    klog_printf("E10A4 READ_DONE index=%u rc=%d stage=%d syscall_attempted=%d signed_returned=%ld transferred=%lu errno=%d requested=%u\n",
                 i,rc,(int)receipt.stage,receipt.syscall_attempted,
                 receipt.syscall_result,receipt.transferred,receipt.error_number,
                 (unsigned)w->n);
     if(rc || receipt.stage!=KERNEL_COPYOUT_EXACT_OK ||
        !receipt.syscall_attempted || receipt.syscall_result!=(long)w->n ||
        receipt.transferred!=(unsigned long)w->n) {
-      klog_printf("E10A4 ABORT reason=READ_ERROR index=%u\\n",i);
+      klog_printf("E10A4 ABORT reason=READ_ERROR index=%u\n",i);
       return 5;
     }
     tohex(got,w->n,actual_hex);
     tohex(poison,w->n,initial_hex);
-    klog_printf("E10A4 READ_BYTES index=%u data=%s initial=%s\\n",
+    klog_printf("E10A4 READ_BYTES index=%u data=%s initial=%s\n",
                 i,actual_hex,initial_hex);
     if(!memcmp(got,poison,w->n) || memcmp(got,w->expected,w->n)) {
-      klog_printf("E10A4 ABORT reason=BYTE_MISMATCH index=%u\\n",i);
+      klog_printf("E10A4 ABORT reason=BYTE_MISMATCH index=%u\n",i);
       return 6;
     }
   }
