@@ -115,7 +115,7 @@ jobs:
           entries=[]
           for line in reloc.splitlines():
               f=line.split()
-              if len(f)>=5 and f[2].startswith("R_X86_64_"):
+              if len(f)>=4 and f[2].startswith("R_X86_64_"):
                   assert f[2]=="R_X86_64_RELATIVE",("Unsupported relocation",f[2])
                   off=int(f[0],16); addend=int(f[-1],16) if re.fullmatch(r"[0-9a-fA-F]+",f[-1]) else None
                   assert any(l["start"]<=off and off+8<=l["end"] and "W" in l["flags"] for l in loads),("Unwritable relocation destination",hex(off))
