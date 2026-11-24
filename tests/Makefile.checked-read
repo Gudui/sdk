@@ -1,0 +1,10 @@
+# Host-only test target. Never runs SDK PS5 deployment targets.
+CC ?= cc
+CFLAGS ?= -std=c11 -O1 -g -Wall -Wextra -Werror
+.PHONY: test clean
+test:
+	@mkdir -p build-checked-read
+	$(CC) $(CFLAGS) test_kernel_copyout_exact.c -o build-checked-read/test_kernel_copyout_exact
+	./build-checked-read/test_kernel_copyout_exact
+clean:
+	rm -rf build-checked-read
